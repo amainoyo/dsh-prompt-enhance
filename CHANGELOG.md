@@ -2,6 +2,20 @@
 
 All notable changes are documented here. Versions follow [npm](https://www.npmjs.com/package/dsh-prompt-enhance); each release also has a [GitHub Release](https://github.com/rongxingda/dsh-prompt-enhance/releases) page with notes.
 
+## 0.2.2 (2026-09-27)
+
+Forward compatibility with the current dsh line (`0.1.5-rc.3` / `0.1.7-rc.2`). On those hosts every enhancement failed with HTTP 502 — this is a bug fix, not a feature: no API, config, or dependency changes, and no behavior change on any already-supported host.
+
+**Default model route.** `defaultRouteOf()` resolves the harness-wide selection through three shapes, tried in order, where each miss means "try the next" and never "fail the enhance request": (1) the `agentDefaultModel` service fetched by name via `ctx.get` and read through `currentSelection()` (dsh >= `0.1.5-rc.3`); (2) the same service reached as a context property, for hosts that inject it for us; (3) the legacy synchronous `settings.get('agent-default-model')` namespace read (<= `0.1.2-rc.1`). `ctx.get` deliberately precedes the property read: cordis raises `cannot get property "agentDefaultModel" without inject` when a property is read without declaring the dependency, and declaring it through `inject` is not survivable for a cross-version plugin — hosts without the service would then never activate the plugin at all. Both the property access and the `currentSelection()` call are individually guarded.
+
+**Store reads.** A new `serviceEntry(ctx, service, key)` helper guards the whole cordis store handshake — service present, `get` actually a function, call wrapped — and `sessionRouteOf()` / `conversationContextOf()` now read sessions through it. A structural interface can promise `get`; only a runtime existence check keeps that promise honest, and a missing reader must degrade to "no entry" instead of `ctx.get(...)?.get is not a function` on the critical path of every request.
+
+Without this change the failure was absolute rather than partial: the route resolution ran on every enhance call, so a single unsupported service shape turned the whole plugin dark.
+
+Verified on a real `0.1.7-rc.2` profile: the layer mounts with zero errors, `POST /prompt-enhance/enhance` reaches the configured LLM (the `Insufficient Balance` response came from the upstream account, which proves model routing worked end to end), `/prompt-enhance/enhance-stream` returns well-formed SSE, and a hostile Origin still gets 403. Docs now list `0.1.7-rc.2` among the boot-verified lines.
+
+Tests: 169 (new regression: settings service without a synchronous reader degrades, sessions store without a reader degrades, selection via property, `ctx.get` preferred over the property, fallback to the legacy namespace, a throwing `currentSelection`, and the cordis `without inject` throw).
+
 ## 0.2.1 (2026-09-08)
 
 Internal hardening from the 0.2.0 self-audit — three performance fixes with no behavior change, a privacy clarification in the docs, and a devDependency cleanup. No new features, no config changes.
