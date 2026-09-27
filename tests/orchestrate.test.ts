@@ -3,8 +3,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import { DEFAULT_CONFIG } from '../src/config'
 import { defaultRouteOf, sessionRouteOf } from '../src/orchestrate'
 
-function fakeCtx(services: Record<string, unknown>): Context {
-  return { get: (key: string) => services[key] } as never
+/**
+ * Minimal cordis stand-in. Cordis services are injected as CONTEXT PROPERTIES
+ * (`ctx.agentDefaultModel`), not via `ctx.get`, hence the second argument —
+ * a cordis-service face has to be shaped as a property to be reachable.
+ */
+function fakeCtx(services: Record<string, unknown>, props: Record<string, unknown> = {}): Context {
+  return { get: (key: string) => services[key], ...props } as never
 }
 
 describe('route resolution helpers', () => {
@@ -17,6 +22,60 @@ describe('route resolution helpers', () => {
     expect(defaultRouteOf(fakeCtx({ settings: { get: () => ({ provider: 'x', model: '' }) } }))).toBeUndefined()
     expect(defaultRouteOf(fakeCtx({ settings: { get: () => null } }))).toBeUndefined()
     expect(defaultRouteOf(fakeCtx({}))).toBeUndefined()
+  })
+
+  // Regression (dsh >= 0.1.5-rc.3): the settings service became `SettingsForms`
+  // with no synchronous `get`. Calling through the old shape threw
+  // `ctx.get(...)?.get is not a function` and 502'd EVERY enhancement, because
+  // this sits on every request's route-resolution path. A missing reader must
+  // degrade to "no answer", never to a thrown TypeError.
+  it('degrades when the settings service has no synchronous reader', () => {
+    const forms = { configure: () => {}, describe: () => [], update: async () => {} }
+    expect(() => defaultRouteOf(fakeCtx({ settings: forms }))).not.toThrow()
+    expect(defaultRouteOf(fakeCtx({ settings: forms }))).toBeUndefined()
+  })
+
+  it('degrades when the sessions store has no reader', () => {
+    expect(sessionRouteOf(fakeCtx({ sessions: { list: () => [] } }), 's1')).toBeUndefined()
+  })
+
+  // dsh >= 0.1.5-rc.3 reads the selection from `ctx.agentDefaultModel`
+  // instead of the settings namespace. Both shapes must answer; neither may
+  // throw, because this runs on every enhance request.
+  it('reads the harness default model from agentDefaultModel', () => {
+    const ctx = fakeCtx({}, { agentDefaultModel: { currentSelection: () => ({ provider: ' deepseek ', model: ' chat ' }) } })
+    expect(defaultRouteOf(ctx)).toEqual({ provider: 'deepseek', model: 'chat' })
+  })
+
+  it('prefers agentDefaultModel and falls back to the legacy settings read', () => {
+    const legacy = fakeCtx({ settings: { get: () => ({ provider: 'legacy-p', model: 'legacy-m' }) } })
+    expect(defaultRouteOf(legacy)).toEqual({ provider: 'legacy-p', model: 'legacy-m' })
+
+    const emptyModern = fakeCtx(
+      { settings: { get: () => ({ provider: 'legacy-p', model: 'legacy-m' }) } },
+      { agentDefaultModel: { currentSelection: () => undefined } },
+    )
+    expect(defaultRouteOf(emptyModern)).toEqual({ provider: 'legacy-p', model: 'legacy-m' })
+  })
+
+  it('survives an agentDefaultModel that throws', () => {
+    const ctx = fakeCtx({}, { agentDefaultModel: { currentSelection: () => { throw new Error('boom') } } })
+    expect(() => defaultRouteOf(ctx)).not.toThrow()
+    expect(defaultRouteOf(ctx)).toBeUndefined()
+  })
+
+  // cordis throws `cannot get property "agentDefaultModel" without inject` for
+  // any service that was not declared via `inject`, and the PROPERTY READ is
+  // what throws — so guarding only the call would still 502 every request.
+  it('survives reading agentDefaultModel without inject', () => {
+    const ctx = {
+      get: (key: string) => undefined,
+      get agentDefaultModel(): never {
+        throw new Error('cannot get property "agentDefaultModel" without inject')
+      },
+    } as never
+    expect(() => defaultRouteOf(ctx)).not.toThrow()
+    expect(defaultRouteOf(ctx)).toBeUndefined()
   })
 
   // Regression: `Session.requestHeader` is a method in both 0.1.1-rc.2 and
